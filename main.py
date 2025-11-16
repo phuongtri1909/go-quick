@@ -56,66 +56,105 @@ class DetectWorker():
         elif self.type_ == 3:
             results = self.excel_to_png(self.path_img)
             return results
-    def pdf_to_png(self,pdf_folder):
-        pdf_files = [f for f in os.listdir(pdf_folder) if f.lower().endswith(".pdf")]
-        if not pdf_files:
-            return {
-                "status": "error",
-                "message": f"Không tìm thấy file PDF nào trong: {pdf_folder}"
-            }
-        mem_zip = BytesIO()
-        total_images = 0
-
+    def pdf_to_png(self, zip_bytes_input):
+        """
+        Convert PDF files from zip bytes to PNG images
+        Args:
+            zip_bytes_input: bytes hoặc str base64 của zip chứa các file PDF
+        Returns:
+            dict: status, message, total_pdfs, total_images, zip_base64
+        """
         try:
-            with zipfile.ZipFile(mem_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for pdf_file in pdf_files:
-                    pdf_path = os.path.join(pdf_folder, pdf_file)
-                    doc = fitz.open(pdf_path)
-                    pdf_stem = os.path.splitext(pdf_file)[0]
-                    for i, page in enumerate(doc):
-                        pix = page.get_pixmap()
-                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-                        pair_num = (i // 2) + 1
-                        side = "mt" if i % 2 == 0 else "ms"
-                        img_name = f"{pdf_stem}/{pair_num}{side}.png"
-
-                        img_buf = BytesIO()
-                        img.save(img_buf, format="PNG")
-                        img_buf.seek(0)
-
-                        zf.writestr(img_name, img_buf.getvalue())
-                        total_images += 1
-
-            mem_zip.seek(0)
-            zip_bytes = mem_zip.getvalue()
-            zip_b64 = base64.b64encode(zip_bytes).decode("ascii")
+            # Convert base64 string to bytes if needed
+            if isinstance(zip_bytes_input, str):
+                zip_bytes = base64.b64decode(zip_bytes_input)
+            else:
+                zip_bytes = zip_bytes_input
+            
+            # Read zip file from bytes
+            input_zip = BytesIO(zip_bytes)
+            output_zip = BytesIO()
+            total_images = 0
+            pdf_count = 0
+            
+            with zipfile.ZipFile(input_zip, "r") as zf_in:
+                pdf_files = [f for f in zf_in.namelist() if f.lower().endswith(".pdf")]
+                
+                if not pdf_files:
+                    return {
+                        "status": "error",
+                        "message": "Không tìm thấy file PDF nào trong zip"
+                    }
+                
+                with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf_out:
+                    for pdf_file in pdf_files:
+                        try:
+                            # Read PDF from zip
+                            pdf_data = zf_in.read(pdf_file)
+                            pdf_stream = BytesIO(pdf_data)
+                            doc = fitz.open(stream=pdf_stream, filetype="pdf")
+                            
+                            pdf_stem = os.path.splitext(os.path.basename(pdf_file))[0]
+                            pdf_count += 1
+                            
+                            for i, page in enumerate(doc):
+                                pix = page.get_pixmap()
+                                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                
+                                pair_num = (i // 2) + 1
+                                side = "mt" if i % 2 == 0 else "ms"
+                                img_name = f"{pdf_stem}/{pair_num}{side}.png"
+                                
+                                img_buf = BytesIO()
+                                img.save(img_buf, format="PNG")
+                                img_buf.seek(0)
+                                
+                                zf_out.writestr(img_name, img_buf.getvalue())
+                                total_images += 1
+                        except Exception as e:
+                            print(f"Lỗi xử lý PDF {pdf_file}: {e}")
+                            continue
+            
+            output_zip.seek(0)
+            result_bytes = output_zip.getvalue()
+            result_b64 = base64.b64encode(result_bytes).decode("ascii")
+            
             return {
                 "status": "success",
                 "message": "Chuyển PDF → PNG và đóng gói ZIP thành công.",
-                "total_pdfs": len(pdf_files),
+                "total_pdfs": pdf_count,
                 "total_images": total_images,
                 "zip_name": "images.zip",
-                "zip_base64": zip_b64
+                "zip_base64": result_b64
             }
-
+        
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Lỗi khi xử lý PDF: {e}"
+                "message": f"Lỗi khi xử lý PDF bytes: {e}"
             }
-    def excel_to_png(self,excel_path):
-        if not os.path.isfile(excel_path):
-            return {
-                "status": "error",
-                "message": f"Không tìm thấy file Excel: {excel_path}"
-            }
+    def excel_to_png(self, excel_bytes_input):
+        """
+        Download images from Excel bytes (Google Drive URLs)
+        Args:
+            excel_bytes_input: bytes hoặc str base64 của file Excel
+        Returns:
+            dict: status, message, total_rows, total_images, zip_base64
+        """
         try:
-            df = pd.read_excel(excel_path, header=0)  # hàng đầu là header
+            # Convert base64 string to bytes if needed
+            if isinstance(excel_bytes_input, str):
+                excel_bytes = base64.b64decode(excel_bytes_input)
+            else:
+                excel_bytes = excel_bytes_input
+            
+            # Read Excel from bytes
+            excel_stream = BytesIO(excel_bytes)
+            df = pd.read_excel(excel_stream, header=0)  # hàng đầu là header
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Lỗi đọc file Excel: {e}"
+                "message": f"Lỗi đọc file Excel bytes: {e}"
             }
 
         if df.shape[1] < 3:
@@ -341,77 +380,165 @@ class DetectWorker():
             return rect
 
         os.makedirs(".\\__pycache__\\md1\\cropped_results", exist_ok=True)
-        # ----- DỰ ĐOÁN ẢNH -----
-        img_files = [os.path.join(self.path_img, f) 
-                    for f in os.listdir(self.path_img) 
-                    if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+        
+        # Handle bytes input (zip or raw bytes with images)
+        if isinstance(self.path_img, bytes) or (isinstance(self.path_img, str) and self.path_img.startswith('UEsDB')):  # base64 zip detection
+            try:
+                # Convert base64 string to bytes if needed
+                if isinstance(self.path_img, str):
+                    zip_bytes = base64.b64decode(self.path_img)
+                else:
+                    zip_bytes = self.path_img
+                
+                input_zip = BytesIO(zip_bytes)
+                img_files = []
+                
+                with zipfile.ZipFile(input_zip, "r") as zf:
+                    img_files = [f for f in zf.namelist() if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+                    
+                    total = len(img_files)
+                    if total == 0:
+                        print("Không có ảnh nào.")
+                        return
+                    
+                    for i, img_file in enumerate(img_files):
+                        img_data = zf.read(img_file)
+                        img_stream = BytesIO(img_data)
+                        img_array = cv2.imdecode(np.frombuffer(img_stream.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+                        
+                        results = self.model1.predict(source=img_array, conf=0.5, save=False)
+                        r = results[0]
+                        
+                        if len(r.keypoints) == 0:
+                            continue
+                        
+                        file_name = os.path.splitext(os.path.basename(img_file))[0]
+                        image_bgr = img_array
+                        kpts = r.keypoints.xy[0].cpu().numpy()
+                        
+                        if kpts.shape[0] != 4:
+                            continue
+                        
+                        # Rest of detection logic...
+                        conf = r.keypoints.conf[0].cpu().numpy()
+                        avg_conf = np.mean(conf) * 100
+                        
+                        if avg_conf < 75:
+                            h, w = image_bgr.shape[:2]
+                            text = f"Không đạt ({avg_conf:.1f}%)"
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            scale = 1.2
+                            thickness = 3
+                            text_size = cv2.getTextSize(text, font, scale, thickness)[0]
+                            text_x = (w - text_size[0]) // 2
+                            text_y = (h + text_size[1]) // 2
+                            cv2.putText(image_bgr, text, (text_x, text_y), font, scale, (0, 0, 255), thickness)
+                            cv2.imwrite(f".\\__pycache__\\md1\\cropped_results\\{file_name}.jpg", image_bgr)
+                            print(f"[!] {file_name} độ chính xác thấp ({avg_conf:.1f}%)")
+                            continue
+                        
+                        pts = kpts.astype(np.float32)
+                        ordered_pts = order_points(pts)
+                        
+                        text = f"Conf: {avg_conf:.1f}%"
+                        text_org = (int(ordered_pts[0][0]), int(ordered_pts[0][1]) - 10)
+                        cv2.putText(image_bgr, text, text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        
+                        (tl, tr, br, bl) = ordered_pts
+                        widthA = np.linalg.norm(br - bl)
+                        widthB = np.linalg.norm(tr - tl)
+                        maxWidth = int(max(widthA, widthB))
+                        heightA = np.linalg.norm(tr - br)
+                        heightB = np.linalg.norm(tl - bl)
+                        maxHeight = int(max(heightA, heightB))
+                        
+                        dst = np.array([
+                            [0, 0],
+                            [maxWidth - 1, 0],
+                            [maxWidth - 1, maxHeight - 1],
+                            [0, maxHeight - 1]
+                        ], dtype="float32")
+                        M = cv2.getPerspectiveTransform(ordered_pts, dst)
+                        warped = cv2.warpPerspective(image_bgr, M, (maxWidth, maxHeight))
+                        cv2.polylines(image_bgr, [ordered_pts.astype(np.int32)], isClosed=True, color=(0, 255, 0), thickness=2)
+                        
+                        cv2.imwrite(f".\\__pycache__\\md1\\cropped_results\\{file_name}.jpg", warped)
+                        cv2.imwrite(f".\\__pycache__\\md1\\boxed_{file_name}.jpg", image_bgr)
+            except Exception as e:
+                print(f"Lỗi xử lý zip bytes: {e}")
+                return
+        else:
+            # Handle file path input
+            img_files = [os.path.join(self.path_img, f) 
+                        for f in os.listdir(self.path_img) 
+                        if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
 
-        total = len(img_files)
-        if total == 0:
-            print("Không có ảnh nào.")
-            return
-        for i, img_path in enumerate(img_files):
-            results = self.model1.predict(source=img_path, conf=0.5, save=False)
-            r = results[0]
-            if len(r.keypoints) == 0:
-                continue
-            image_bgr = cv2.imread(r.path)
-            file_name = os.path.basename(r.path)
-            file_name = os.path.splitext(file_name)[0] 
-            kpts = r.keypoints.xy[0].cpu().numpy()  # (4, 2)
-            if kpts.shape[0] != 4:
-                continue  
+            total = len(img_files)
+            if total == 0:
+                print("Không có ảnh nào.")
+                return
+            for i, img_path in enumerate(img_files):
+                results = self.model1.predict(source=img_path, conf=0.5, save=False)
+                r = results[0]
+                if len(r.keypoints) == 0:
+                    continue
+                image_bgr = cv2.imread(r.path)
+                file_name = os.path.basename(r.path)
+                file_name = os.path.splitext(file_name)[0] 
+                kpts = r.keypoints.xy[0].cpu().numpy()  # (4, 2)
+                if kpts.shape[0] != 4:
+                    continue  
 
-            # ==== TÍNH ĐỘ CHÍNH XÁC ====
-            conf = r.keypoints.conf[0].cpu().numpy()
-            avg_conf = np.mean(conf) * 100  # %
+                # ==== TÍNH ĐỘ CHÍNH XÁC ====
+                conf = r.keypoints.conf[0].cpu().numpy()
+                avg_conf = np.mean(conf) * 100  # %
 
-            if avg_conf < 75:
-                # VẼ CHỮ GIỮA ẢNH: "Không đạt"
-                h, w = image_bgr.shape[:2]
-                text = f"Không đạt ({avg_conf:.1f}%)"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                scale = 1.2
-                thickness = 3
-                text_size = cv2.getTextSize(text, font, scale, thickness)[0]
-                text_x = (w - text_size[0]) // 2
-                text_y = (h + text_size[1]) // 2
-                cv2.putText(image_bgr, text, (text_x, text_y), font, scale, (0, 0, 255), thickness)
+                if avg_conf < 75:
+                    # VẼ CHỮ GIỮA ẢNH: "Không đạt"
+                    h, w = image_bgr.shape[:2]
+                    text = f"Không đạt ({avg_conf:.1f}%)"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    scale = 1.2
+                    thickness = 3
+                    text_size = cv2.getTextSize(text, font, scale, thickness)[0]
+                    text_x = (w - text_size[0]) // 2
+                    text_y = (h + text_size[1]) // 2
+                    cv2.putText(image_bgr, text, (text_x, text_y), font, scale, (0, 0, 255), thickness)
 
-                # Lưu ảnh không đạt
-                cv2.imwrite(f".\\__pycache__\\md1\\cropped_results\\{file_name}.jpg", image_bgr)
-                print(f"[!] {file_name} độ chính xác thấp ({avg_conf:.1f}%)")
-                continue
+                    # Lưu ảnh không đạt
+                    cv2.imwrite(f".\\__pycache__\\md1\\cropped_results\\{file_name}.jpg", image_bgr)
+                    print(f"[!] {file_name} độ chính xác thấp ({avg_conf:.1f}%)")
+                    continue
 
-            # ==== Tiếp tục xử lý ảnh đạt yêu cầu ====
-            pts = kpts.astype(np.float32)
-            ordered_pts = order_points(pts)
+                # ==== Tiếp tục xử lý ảnh đạt yêu cầu ====
+                pts = kpts.astype(np.float32)
+                ordered_pts = order_points(pts)
 
-            # Vẽ khung và độ chính xác lên ảnh
-            text = f"Conf: {avg_conf:.1f}%"
-            text_org = (int(ordered_pts[0][0]), int(ordered_pts[0][1]) - 10)
-            cv2.putText(image_bgr, text, text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                # Vẽ khung và độ chính xác lên ảnh
+                text = f"Conf: {avg_conf:.1f}%"
+                text_org = (int(ordered_pts[0][0]), int(ordered_pts[0][1]) - 10)
+                cv2.putText(image_bgr, text, text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-            (tl, tr, br, bl) = ordered_pts
-            widthA = np.linalg.norm(br - bl)
-            widthB = np.linalg.norm(tr - tl)
-            maxWidth = int(max(widthA, widthB))
-            heightA = np.linalg.norm(tr - br)
-            heightB = np.linalg.norm(tl - bl)
-            maxHeight = int(max(heightA, heightB))
+                (tl, tr, br, bl) = ordered_pts
+                widthA = np.linalg.norm(br - bl)
+                widthB = np.linalg.norm(tr - tl)
+                maxWidth = int(max(widthA, widthB))
+                heightA = np.linalg.norm(tr - br)
+                heightB = np.linalg.norm(tl - bl)
+                maxHeight = int(max(heightA, heightB))
 
-            dst = np.array([
-                [0, 0],
-                [maxWidth - 1, 0],
-                [maxWidth - 1, maxHeight - 1],
-                [0, maxHeight - 1]
-            ], dtype="float32")
-            M = cv2.getPerspectiveTransform(ordered_pts, dst)
-            warped = cv2.warpPerspective(image_bgr, M, (maxWidth, maxHeight))
-            cv2.polylines(image_bgr, [ordered_pts.astype(np.int32)], isClosed=True, color=(0, 255, 0), thickness=2)
+                dst = np.array([
+                    [0, 0],
+                    [maxWidth - 1, 0],
+                    [maxWidth - 1, maxHeight - 1],
+                    [0, maxHeight - 1]
+                ], dtype="float32")
+                M = cv2.getPerspectiveTransform(ordered_pts, dst)
+                warped = cv2.warpPerspective(image_bgr, M, (maxWidth, maxHeight))
+                cv2.polylines(image_bgr, [ordered_pts.astype(np.int32)], isClosed=True, color=(0, 255, 0), thickness=2)
 
-            cv2.imwrite(f".\\__pycache__\\md1\\cropped_results\\{file_name}.jpg", warped)
-            cv2.imwrite(f".\\__pycache__\\md1\\boxed_{file_name}.jpg", image_bgr)
+                cv2.imwrite(f".\\__pycache__\\md1\\cropped_results\\{file_name}.jpg", warped)
+                cv2.imwrite(f".\\__pycache__\\md1\\boxed_{file_name}.jpg", image_bgr)
 
     def detect_lines(self):
         import cv2
